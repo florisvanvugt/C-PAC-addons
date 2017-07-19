@@ -21,7 +21,7 @@ sns.set_palette(sns.hls_palette(8, l=.3, s=.8))
 
 FULL_LIST = True
 
-USE_SEABORN = False
+USE_SEABORN = True
 
 
 import colorsys
@@ -190,11 +190,11 @@ def make_cluster_scatter(clustermaskf,cluster_n,mergedf,design_matrix,contrast,c
         contrasts = f.read()
     
     # First, find the number of the contrast
-    matc = re.match(r'/ContrastName(\d+)\s*%s'%contrast,contrasts)
+    matc = re.search(r'/ContrastName(\d+)\s*(%s)'%contrast,contrasts)
     if matc:
         contrast_i = int(matc.group(1))-1
     else:
-        print "Cannot find contrast called %s in the contrast file"%contrast
+        print "Cannot find contrast called %s in the contrast file %s"%(contrast,contrastsf)
         return
 
     # Find the contrast matrix definition and read it into a matrix
@@ -270,7 +270,7 @@ def make_cluster_scatter(clustermaskf,cluster_n,mergedf,design_matrix,contrast,c
     if not USE_SEABORN:
         fig = plt.figure(figsize=(7,7))
         ax = fig.add_subplot(111)
-        ax.plot(tab[EV_name],tab["mean"],'o')
+        ax.plot(tab[EV_name],tab["mean"],'o',color=color)
     else:
         fig = plt.figure(figsize=(7,7))
         ax = fig.add_subplot(111)
@@ -396,7 +396,7 @@ if __name__=="__main__":
                             modelf = modeld+"/"+f
                     with open(modelf,'r') as f:
                         contf = f.read()
-                    contrasts = dict([ (int(x),n) for (x,n) in re.findall(r'/ContrastName(\d+)\s*([\.\w_\-\+]+)',contf)])
+                    contrasts = dict([ (int(x),n) for (x,n) in re.findall(r'/ContrastName(\d+)\s*([<>\.\w_\-\+]+)',contf)])
                     f_tests   = dict([ (f+1   ,n) for (f,n) in enumerate(re.findall(r'f_test_([\w\_\-\+]+)',contf)) ])
 
                     # Open the cluster listing
