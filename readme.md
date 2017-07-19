@@ -12,6 +12,13 @@ Here are some notes and tools relating to using [C-PAC](https://github.com/FCP-I
 
 # Some notes about using C-PAC
 
+## Building a subject list
+
+```
+cpac_setup.py /path/to/data_config
+```
+
+
 ## Running
 
 To run, use:
