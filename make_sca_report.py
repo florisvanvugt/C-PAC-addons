@@ -8,6 +8,8 @@ import re
 import pandas as pd
 import base64
 import subprocess
+import sys
+import StringIO
 
 import numpy as np
 import matplotlib as mpl
@@ -19,6 +21,7 @@ sns.set_palette(sns.hls_palette(8, l=.3, s=.8))
 
 FULL_LIST = True
 
+USE_SEABORN = False
 
 
 import colorsys
@@ -142,145 +145,6 @@ def make_cluster_rendering(clusterfile,cluster_n,colour=(1.0,0,0),image_width=75
 
 
 
-print("<html><body>\n")
-
-import sys
-
-if len(sys.argv)<2:
-    print("give the directory as an argument.")
-    print("usage:")
-    print("python make_sca_report <cpac_output_directory>")
-    exit(-1)
-
-startdir = sys.argv[1] # the directory where we should start looking
-
-
-if not os.path.exists(startdir):
-    print("Cannot find directory %s"%startdir)
-    exit(-1)
-
-
-
-
-basedir = None
-for root, dirs, files in os.walk(startdir):
-    for d in dirs:
-        if d.startswith('_fisher_z_score'):
-            # Bingo! root is the directory that we need to work with
-            if basedir==None:
-                print("Starting from directory %s"%root)
-                basedir = root
-                break
-            else:
-                print("Ambiguity about starting directory! %s is a valid directory but %s also. Exiting."%(basedir,root))
-                exit(-1)
-
-if basedir==None:
-    print("Cannot find _fisher_z_score directories in the tree starting at %s"%startdir)
-    
-    
-    
-cwd = os.getcwd()
-
-
-# First, let's find the subpath where we have the split up by seed,
-# i.e. the path where you have the _fisher_z_scoreXX
-# subdirectories.
-
-
-
-
-master_cluster_list = []
-i = 0
-while os.path.exists("%s/_fisher_z_score%i"%(basedir,i)):
-    #print(i)
-
-    path = "%s/_fisher_z_score%i/sca_ROI_%i"%(basedir,i,i+1)
-
-    for stattype in ["","f"]:
-
-        keep_going = True
-        j = 1
-        while keep_going:
-
-            bodyname     = "z%sstat%i"%(stattype,j)
-            clusterl     = "%s/stats/clusterMap/cluster_%s.txt"%(path,bodyname)
-            clustermask  = "%s/stats/clusterMap/cluster_mask_%s.nii.gz"%(path,bodyname)
-            renderedf    = "%s/rendered/thresh_z%sstat%i_overlay.png"%(path,stattype,j) 
-
-            modeld = "%s/model_files"%path
-
-            subjectl = []
-            designmat = pd.DataFrame.from_csv('%s/model_files/design_matrix.csv'%path)
-            if os.path.exists("%s/model_files"%path):
-                fs = os.listdir("%s/model_files"%path)
-                for f in fs:
-                    if f.startswith("subject_list_group_analysis"):
-                        subjectl = [ v.strip() for v in open("%s/model_files/%s"%(path,f),'r').readlines() ]
-
-                
-            
-            if os.path.exists(clusterl):
-                #print("Found cluster list %s"%clusterl)
-
-                # Find the contrasts file associated with this analysis, parse it
-                # to get the contrast and F-test names.
-                modelf = None
-                fs = os.listdir(modeld)
-                for f in fs:
-                    if f.endswith(".con"):
-                        modelf = modeld+"/"+f
-                with open(modelf,'r') as f:
-                    contf = f.read()
-                contrasts = dict([ (int(x),n) for (x,n) in re.findall(r'/ContrastName(\d+)\s*([\.\w_\-\+]+)',contf)])
-                f_tests   = dict([ (f+1   ,n) for (f,n) in enumerate(re.findall(r'f_test_([\w\_\-\+]+)',contf)) ])
-
-                # Open the cluster listing
-                with open(clusterl,'r') as f:
-                    lns = f.readlines()
-                if len(lns)>1: # if there are actually any clusters (the first line is to be ignored because it's the header)
-                    clustertab = pd.DataFrame.from_csv(clusterl,sep="\t") #np.genfromtxt(clusterl,delimiter="\t",names=True)
-                else:
-                    clustertab = None
-                    
-                statname = ""
-                if stattype=="": # contrast
-                    statname=contrasts[j]
-                elif stattype=="f": # F-test
-                    statname="F-"+f_tests[j]
-
-                # Find the merged file (where each volume is one subject z-map)
-                mergedd = "%s/merged"%path
-                mergedfile = None
-                if os.path.exists(mergedd):
-                    fs = os.listdir(mergedd)
-                    if len(fs)==1: # there should really be just one
-                        mergedfile = mergedd+"/"+fs[0]
-
-                    
-                master_cluster_list.append({"seed"        :i+1,
-                                            "path"        :path,
-                                            "body"        :bodyname,
-                                            "stat"        :"%s%i"%(stattype,j),
-                                            "cluster.file":clusterl,
-                                            "cluster.mask":clustermask,
-                                            "n.cluster"   :len(lns)-1,
-                                            "rendered"    :renderedf,
-                                            "clustertab"  :clustertab,
-                                            "merged.file" :mergedfile,
-                                            "statname"    :statname,
-                                            "subject.list":subjectl,
-                                            "design.matrix":designmat,
-                })
-                j+=1
-                
-            else:
-                keep_going = False
-
-    i+=1
-
-
-
 
 # Now, for each seed which has some actual clusters, let's get some subject-level data about those
 # clusters.
@@ -289,199 +153,453 @@ while os.path.exists("%s/_fisher_z_score%i"%(basedir,i)):
 os.environ["AFNI_NIFTI_TYPE_WARN"] = "NO"
 
 
-for cl in master_cluster_list:
-    cl["persubject"]={}
-    if cl["n.cluster"]>0 and cl["merged.file"]!=None:
-        # Given a cluster map (a nifty file where each voxel is numbered according to which cluster it is part of, or zero if it is not part of any cluster),
-        # create a cluster mask and then find the individual average correlation coefficients for the voxels
-        # within that cluster.
 
-
-        colours = get_colors(cl["n.cluster"])
-        
-        # Then we can take the average from that mask for each of the volumes in the merged file, i.e. for each subject
-        for cluster_n in range(cl["n.cluster"]):
-
-
-            clusterrender = make_cluster_rendering(cl["cluster.mask"],cluster_n+1,colour=colours[cluster_n],template = "/usr/share/fsl/5.0/data/standard/MNI152_T1_3mm_brain.nii.gz")
-            
-            #tab = {"subject":cl["subject.list"]}
-            tab = cl["design.matrix"]
-            
-            for valtype in ["mean","min","max","median"]:
-            
-                cmd = ["3dmaskave",
-                       "-quiet",
-                       "-mask",cl["cluster.mask"],
-                       "-mrange",str(cluster_n+1),str(cluster_n+1) ]
-
-                if valtype!="mean":
-                    cmd+= ["-%s"%valtype]
-
-                cmd += [cl["merged.file"]]
-
-                result = subprocess.check_output(cmd) #, stdout=subprocess.PIPE)
-                tb = [ float(f) for f in str(result).split() ]
-                assert len(tb)==tab.shape[0] #len(cl["subject.list"])
-                tab[valtype] = tb
-
-            #df = pd.DataFrame(tab)
-            tab = tab.reset_index()
-
-            # Okay, now a little hack -- TODO: make this proper, compute the actual contrast value...
-            # For now, we just find the regressor with the most appropriate looking name
-            behav = ""
-            regressors = list(cl["design.matrix"].columns.values)
-            for regr in regressors:
-                if cl["statname"].find(regr)>-1: # if this contains the regressor
-                    behav = regr
-
-            if behav!="":
-            
-                # Now let's plot this
-                if False:
-                    fig = plt.figure(figsize=(7,7))
-                    ax = fig.add_subplot(111)
-                    ax.plot(tab[behav],tab["mean"],'o')
-                    for i,row in tab.iterrows():
-                        ax.text(row[behav],row["mean"],row["Participant"],fontsize=8,alpha=.5)
-                    ax.set_xlabel(behav)
-                    ax.set_ylabel("FC")
-                    ax.set_title("Seed %i stat %s cluster %i"%(cl["seed"],cl["statname"],cluster_n+1))
-                    sns.despine(offset=5)
-                    plt.tight_layout()
-                else:
-                    fig = plt.figure(figsize=(7,7))
-                    ax = fig.add_subplot(111)
-                    sns.regplot(tab[behav],tab["mean"],color=colours[cluster_n],ax=ax)
-                    for i,row in tab.iterrows():
-                        ax.text(row[behav],row["mean"],row["Participant"],fontsize=8,alpha=.7)
-                    sns.despine(offset=5)
-                    plt.tight_layout()
-                    
-                fig.savefig('/tmp/sca.png',dpi=75)
-                plt.close()
-                encoded = base64.b64encode(open('/tmp/sca.png', "rb").read())
-
-            else:
-                encoded = ""
-                
-            cl["persubject"][cluster_n+1]={'table':tab,'png':encoded,"cluster.rendering":clusterrender}
-            
-
-print("""
-<style>
-#seedresults {
-    font-family: Helvetica, sans-serif;
-    border-collapse: collapse;
-//width: 100%;
-}
-
-#seedresults td, #seedresults th {
-    border: 1px solid #ddd;
-    padding: 6px;
-}
-
-#seedresults tr:nth-child(even){background-color: #f2f2f2;}
-
-#seedresults tr:hover {background-color: #ddd;}
-
-#seedresults th {
-    padding-top: 12px;
-    padding-bottom: 12px;
-    text-align: left;
-    background-color: #e31c63;
-    color: white;
-}
-
-.dataframe {
-    font-family: Helvetica, sans-serif;
-    border-collapse: collapse;
-}
-
-.dataframe th {
-    text-align: left;
-    background-color: #1e28a7;
-    color: white;
-}
-
-
-
-</style>
-""")
+def read_contrasts(contrastf):
+    """ Given a contrasts file, parse it."""
+    pass
 
 
 
 
+
+
+def make_cluster_scatter(clustermaskf,cluster_n,mergedf,design_matrix,contrast,contrastsf,label,color="red"):
+    """ 
+    Given a cluster mask file, and a subject merged file, extract all the connectivity
+    values for a given cluster for all subjects separately. Average them and then
+    compare them against the behavioural EVs producing a scatter plot.
+
+    Arguments
+    clustermaskf   : the file name containing the cluster mask (each voxel 0=no cluster, 1=part of cluster 1, etc.)
+    cluster_n      : which cluster to produce a scatter plot for
+    mergedf        : the file name containing the merged data, i.e. one volume for every subject containing their correlation values
+    design_matrix  : the design matrix of the study, assumed to be a pandas DataFrame
+    contrast       : the contrast to be plotted
+    contrastsf     : a file containing a listing of the contrasts
+    label          : label to be added to the plot
+    color          : the plotting color
+    """ 
+
+
+    #tab = {"subject":cl["subject.list"]}
+    tab = design_matrix.copy()
 
     
-print("<h1>Cluster list</h1>")
-print("<table id=\"seedresults\">")
-print("<tr><th>Seed</th><th>Stat</th><th>Cluster file</th><th># clust</th><th>Render</th></tr>\n")
-for cl in master_cluster_list:
-    if cl["n.cluster"]==0:
-        nclust = "."
-        render = "."
+    # Read in the contrasts file
+    with open(contrastsf,'r') as f:
+        contrasts = f.read()
+    
+    # First, find the number of the contrast
+    matc = re.match(r'/ContrastName(\d+)\s*%s'%contrast,contrasts)
+    if matc:
+        contrast_i = int(matc.group(1))-1
     else:
-        nclust = str(cl["n.cluster"])
-        render = "<a href=\"#%s\">render</a>"%cl["rendered"]
-    print("<tr><td>%i</td><td>%s</td><td><a href=\"%s\">clusters</a></td><td>%s</td><td>%s</td></tr>\n"%(cl["seed"],
-                                                                                                         #cl["stat"],
-                                                                                                         cl["statname"],
-                                                                                                         cl["cluster.file"],
-                                                                                                         nclust,
-                                                                                                         render))
-print("</table>")
+        print "Cannot find contrast called %s in the contrast file"%contrast
+        return
+
+    # Find the contrast matrix definition and read it into a matrix
+    mati = contrasts.find('/Matrix')
+    if mati>-1: # it should be
+        mat = np.genfromtxt(StringIO.StringIO(contrasts[mati+7:]))
+        # columns are the columns in the design matrix
+        # rows are the different contrasts
+
+
+        
+    # Extract just that one contrast
+    contrast_def = np.array(mat[contrast_i]).flatten() # list of the multipliers of the design matrix columns to find the contrast for each subject
+
+    n_nonzero = sum(contrast_def!=0)
+    
+    if n_nonzero==1:
+        # All right, now let's say that a contrast really has only one non-zero value.
+        # Then we just want to plot the corresponding data column. If say it's negative we don't
+        # want to plot the negative of that column, I think that would be more confusing than helpful.
+        
+        EV_name = design_matrix.columns[np.where(contrast_def!=0)[0]]
+        
+        
+    else:
+        # Okay, so this is complex contrast consisting of multiple values.
+        # Let's compute the contrast values for all subjects and go ahead,
+        # adding this to our "design matrix".
+        
+        EV_name = contrast
+        # Let's now add this to the design matrix
+        tab[EV_name]=np.array(np.dot(np.matrix(design_matrix),contrast_def)).flatten()
+    
+    
+    
+
+    for valtype in ["mean","min","max","median"]:
+
+        cmd = ["3dmaskave",
+               "-quiet",
+               "-mask",clustermaskf,
+               "-mrange",str(cluster_n),str(cluster_n) ]
+
+        if valtype!="mean":
+            cmd+= ["-%s"%valtype]
+
+        cmd += [mergedf]
+
+        result = subprocess.check_output(cmd) #, stdout=subprocess.PIPE)
+        tb = [ float(f) for f in str(result).split() ]
+        assert len(tb)==tab.shape[0] #len(cl["subject.list"])
+        tab[valtype] = tb
+
+    #df = pd.DataFrame(tab)
+    tab = tab.reset_index()
+
+
+    # So that gives us for every subject the connectivity values within that cluster.
+    # Now the question is how that relates to their EVs.
+    # What we have is a contrast, so for each subject we can calculate the value
+    # of the contrast, e.g. if the contrast is EV1>EV2 then we can calculate EV1-EV2
+    # which is the relevant value to plot in a scatter plot.
+
+    # Okay, now a little hack -- TODO: make this proper, compute the actual contrast value...
+    # For now, we just find the regressor with the most appropriate looking name
+    #behav = ""
+    #regressors = list(design_matrix.columns.values)
+    #for regr in regressors:
+    #    if contrast.find(regr)>-1: # if this contains the regressor
+    #        behav = regr
+
+    # Now let's plot this
+    if not USE_SEABORN:
+        fig = plt.figure(figsize=(7,7))
+        ax = fig.add_subplot(111)
+        ax.plot(tab[EV_name],tab["mean"],'o')
+    else:
+        fig = plt.figure(figsize=(7,7))
+        ax = fig.add_subplot(111)
+        sns.regplot(tab[EV_name],tab["mean"],color=color,ax=ax)
+
+    # If the values cross zero, add a zero line
+    minm,maxm= min(tab["mean"]),max(tab["mean"])
+    if np.sign(minm)!=np.sign(maxm):
+        plt.plot(tab[EV_name],[0]*len(tab[EV_name]),'-',color="gray",alpha=.5)
+
+    for i,row in tab.iterrows():
+        ax.text(row[EV_name],row["mean"],row["Participant"],fontsize=8,alpha=.5)
+    sns.despine(offset=5)
+    ax.set_title(label)
+    ax.set_xlabel(EV_name)
+    ax.set_ylabel("FC")
+    plt.tight_layout()
+    fig.savefig('/tmp/sca.png',dpi=75)
+    plt.close()
+    encoded = base64.b64encode(open('/tmp/sca.png', "rb").read())
+
+
+    return {'table':tab,'png':encoded} #,"cluster.rendering":clusterrender}
+
+
+
+
+
+
+
+
+
+
+
+if __name__=="__main__":
+
+
+    print("<html><body>\n")
+
+    if len(sys.argv)<2:
+        print("give the directory as an argument.")
+        print("usage:")
+        print("python make_sca_report <cpac_output_directory>")
+        exit(-1)
+
+    startdir = sys.argv[1] # the directory where we should start looking
+
+
+    if not os.path.exists(startdir):
+        print("Cannot find directory %s"%startdir)
+        exit(-1)
+
+
+
+
+    basedir = None
+    for root, dirs, files in os.walk(startdir):
+        for d in dirs:
+            if d.startswith('_fisher_z_score'):
+                # Bingo! root is the directory that we need to work with
+                if basedir==None:
+                    print("Starting from directory %s"%root)
+                    basedir = root
+                    break
+                else:
+                    print("Ambiguity about starting directory! %s is a valid directory but %s also. Exiting."%(basedir,root))
+                    exit(-1)
+
+    if basedir==None:
+        print("Cannot find _fisher_z_score directories in the tree starting at %s"%startdir)
+
+
+
+    cwd = os.getcwd()
+
+
+    # First, let's find the subpath where we have the split up by seed,
+    # i.e. the path where you have the _fisher_z_scoreXX
+    # subdirectories.
+
+
+
+
+    master_cluster_list = []
+    i = 0
+    while os.path.exists("%s/_fisher_z_score%i"%(basedir,i)):
+        #print(i)
+
+        path = "%s/_fisher_z_score%i/sca_ROI_%i"%(basedir,i,i+1)
+
+        for stattype in ["","f"]:
+
+            keep_going = True
+            j = 1
+            while keep_going:
+
+                bodyname     = "z%sstat%i"%(stattype,j)
+                clusterl     = "%s/stats/clusterMap/cluster_%s.txt"%(path,bodyname)
+                clustermask  = "%s/stats/clusterMap/cluster_mask_%s.nii.gz"%(path,bodyname)
+                renderedf    = "%s/rendered/thresh_z%sstat%i_overlay.png"%(path,stattype,j) 
+
+                modeld = "%s/model_files"%path
+
+                subjectl = []
+                designmat = pd.DataFrame.from_csv('%s/model_files/design_matrix.csv'%path)
+                if os.path.exists("%s/model_files"%path):
+                    fs = os.listdir("%s/model_files"%path)
+                    for f in fs:
+                        if f.startswith("subject_list_group_analysis"):
+                            subjectl = [ v.strip() for v in open("%s/model_files/%s"%(path,f),'r').readlines() ]
+
+
+
+                if os.path.exists(clusterl):
+                    #print("Found cluster list %s"%clusterl)
+
+                    # Find the contrasts file associated with this analysis, parse it
+                    # to get the contrast and F-test names.
+                    modelf = None
+                    fs = os.listdir(modeld)
+                    for f in fs:
+                        if f.endswith(".con"):
+                            modelf = modeld+"/"+f
+                    with open(modelf,'r') as f:
+                        contf = f.read()
+                    contrasts = dict([ (int(x),n) for (x,n) in re.findall(r'/ContrastName(\d+)\s*([\.\w_\-\+]+)',contf)])
+                    f_tests   = dict([ (f+1   ,n) for (f,n) in enumerate(re.findall(r'f_test_([\w\_\-\+]+)',contf)) ])
+
+                    # Open the cluster listing
+                    with open(clusterl,'r') as f:
+                        lns = f.readlines()
+                    if len(lns)>1: # if there are actually any clusters (the first line is to be ignored because it's the header)
+                        clustertab = pd.DataFrame.from_csv(clusterl,sep="\t") #np.genfromtxt(clusterl,delimiter="\t",names=True)
+                    else:
+                        clustertab = None
+
+                    statname = ""
+                    if stattype=="": # contrast
+                        statname=contrasts[j]
+                    elif stattype=="f": # F-test
+                        statname="F-"+f_tests[j]
+
+                    # Find the merged file (where each volume is one subject z-map)
+                    mergedd = "%s/merged"%path
+                    mergedfile = None
+                    if os.path.exists(mergedd):
+                        fs = os.listdir(mergedd)
+                        if len(fs)==1: # there should really be just one
+                            mergedfile = mergedd+"/"+fs[0]
+
+
+                    master_cluster_list.append({"seed"        :i+1,
+                                                "path"        :path,
+                                                "body"        :bodyname,
+                                                "stat"        :"%s%i"%(stattype,j),
+                                                "contrast.names":contrasts,
+                                                "contrasts.file":modelf,
+                                                "cluster.file":clusterl,
+                                                "cluster.mask":clustermask,
+                                                "n.cluster"   :len(lns)-1,
+                                                "rendered"    :renderedf,
+                                                "clustertab"  :clustertab,
+                                                "merged.file" :mergedfile,
+                                                "statname"    :statname,
+                                                "subject.list":subjectl,
+                                                "design.matrix":designmat,
+                    })
+                    j+=1
+
+                else:
+                    keep_going = False
+
+        i+=1
+
+
+
+
+
     
 
 
-if FULL_LIST:
 
-    print("<h1>Full listing</h1>\n")
 
     for cl in master_cluster_list:
-	rendered_filename = cl["rendered"]
-        
+        cl["persubject"]={}
+        if cl["n.cluster"]>0 and cl["merged.file"]!=None:
+            # Given a cluster map (a nifty file where each voxel is numbered according to which cluster it is part of, or zero if it is not part of any cluster),
+            # create a cluster mask and then find the individual average correlation coefficients for the voxels
+            # within that cluster.
+            colours = get_colors(cl["n.cluster"])
 
-        if cl["n.cluster"]>0:
-	    print("<h3><a name=\"%s\">Seed %i stat %s</a></h3>"%(rendered_filename,cl["seed"],cl["statname"]))
-
-            #print("<p><img src=\"%s\" /></p>\n"%r)
-
-            # Now read the image and put it directly into the HTML (so that it is standalone)
-            encoded = base64.b64encode(open(rendered_filename, "rb").read())
-            print("<p><img src=\"data:image/png;base64,%s\" /></p>"%encoded)
-
-            
-            fullp = "%s/%s/stats/threshold/thresh_%s.nii.gz"%(cwd,cl["path"],cl["body"])
-            #fullp = "%s/%s/rendered/thresh_%s_overlay.nii.gz"%(cwd,cl["path"],cl["body"])
-            cmd = "fsleyes /usr/share/fsl/5.0/data/standard/MNI152_T1_1mm.nii.gz --name MNI152_T1_1mm --brightness 40 %s --cmap red-yellow"%fullp
-            print("<p style=\"font-size: small;\">%s</p>"%cmd)
-
-            # Print the list of clusters and some data associated with it
-            print(cl["clustertab"].to_html())
-
-            for cli in cl["persubject"]:
-                print("<h4>Cluster %i</h4>"%cli)
-                print("<span style=\"display:none\">\n")
-                print(cl["persubject"][cli]["table"].to_html())
-                print("</span>")
-                #print("<p>Cluster %i - subject values %s"%(cli,cl["persubject"][cli]))
-                print("<p><table><tr><td><img src=\"data:image/png;base64,%s\" /></td>\n"%cl["persubject"][cli]["png"])
-                print("<td><img style=\"width : 600; height:auto\" src=\"data:image/png;base64,%s\" /></td></tr></table>\n"%cl["persubject"][cli]["cluster.rendering"])
-                
-            
-            print("<p style=\"padding:50px\" />") # add a little space to clarify
-            
+            # Then we can take the average from that mask for each of the volumes in the merged file, i.e. for each subject
+            for cluster_n in range(cl["n.cluster"]):
 
 
+                clusterrender = make_cluster_rendering(cl["cluster.mask"],cluster_n+1,colour=colours[cluster_n],template = "/usr/share/fsl/5.0/data/standard/MNI152_T1_3mm_brain.nii.gz")
+
+
+                clsc = make_cluster_scatter(clustermaskf = cl["cluster.mask"],
+                                            cluster_n    = cluster_n+1,
+                                            mergedf      = cl["merged.file"],
+                                            design_matrix= cl["design.matrix"],
+                                            contrast     = cl["statname"],
+                                            contrastsf   = cl["contrasts.file"],
+                                            label        = "Seed %i stat %s cluster %i"%(cl["seed"],cl["statname"],cluster_n+1),
+                                            color         = colours[cluster_n]
+                )
+
+                clsc["cluster.rendering"]=clusterrender
+
+                cl["persubject"][cluster_n+1]=clsc
+
+
+
+
+
+    print("""
+    <style>
+    #seedresults {
+        font-family: Helvetica, sans-serif;
+        border-collapse: collapse;
+    //width: 100%;
+    }
+
+    #seedresults td, #seedresults th {
+        border: 1px solid #ddd;
+        padding: 6px;
+    }
+
+    #seedresults tr:nth-child(even){background-color: #f2f2f2;}
+
+    #seedresults tr:hover {background-color: #ddd;}
+
+    #seedresults th {
+        padding-top: 12px;
+        padding-bottom: 12px;
+        text-align: left;
+        background-color: #e31c63;
+        color: white;
+    }
+
+    .dataframe {
+        font-family: Helvetica, sans-serif;
+        border-collapse: collapse;
+    }
+
+    .dataframe th {
+        text-align: left;
+        background-color: #1e28a7;
+        color: white;
+    }
+
+
+
+    </style>
+    """)
+
+
+
+
+
+
+    print("<h1>Cluster list</h1>")
+    print("<table id=\"seedresults\">")
+    print("<tr><th>Seed</th><th>Stat</th><th>Cluster file</th><th># clust</th><th>Render</th></tr>\n")
+    for cl in master_cluster_list:
+        if cl["n.cluster"]==0:
+            nclust = "."
+            render = "."
         else:
-            #print("<p><a href=\"%s\">show</a></p>\n"%r)
-            pass
+            nclust = str(cl["n.cluster"])
+            render = "<a href=\"#%s\">render</a>"%cl["rendered"]
+        print("<tr><td>%i</td><td>%s</td><td><a href=\"%s\">clusters</a></td><td>%s</td><td>%s</td></tr>\n"%(cl["seed"],
+                                                                                                             #cl["stat"],
+                                                                                                             cl["statname"],
+                                                                                                             cl["cluster.file"],
+                                                                                                             nclust,
+                                                                                                             render))
+    print("</table>")
 
-            #print("<p>fsleyes --scene ortho --layout horizontal /usr/share/fsl/5.0/data/standard/MNI152_T1_1mm.nii.gz --overlayType volume --name MNI152_T1_1mm --volume 0 %s --cmap red-yellow &amp;</p>"%fullp)
+
+
+    if FULL_LIST:
+
+        print("<h1>Full listing</h1>\n")
+
+        for cl in master_cluster_list:
+            rendered_filename = cl["rendered"]
+
+
+            if cl["n.cluster"]>0:
+                print("<h3><a name=\"%s\">Seed %i stat %s</a></h3>"%(rendered_filename,cl["seed"],cl["statname"]))
+
+                #print("<p><img src=\"%s\" /></p>\n"%r)
+
+                # Now read the image and put it directly into the HTML (so that it is standalone)
+                encoded = base64.b64encode(open(rendered_filename, "rb").read())
+                print("<p><img src=\"data:image/png;base64,%s\" /></p>"%encoded)
+
+
+                fullp = "%s/%s/stats/threshold/thresh_%s.nii.gz"%(cwd,cl["path"],cl["body"])
+                #fullp = "%s/%s/rendered/thresh_%s_overlay.nii.gz"%(cwd,cl["path"],cl["body"])
+                cmd = "fsleyes /usr/share/fsl/5.0/data/standard/MNI152_T1_1mm.nii.gz --name MNI152_T1_1mm --brightness 40 %s --cmap red-yellow"%fullp
+                print("<p style=\"font-size: small;\">%s</p>"%cmd)
+
+                # Print the list of clusters and some data associated with it
+                print(cl["clustertab"].to_html())
+
+                for cli in cl["persubject"]:
+                    print("<h4>Cluster %i</h4>"%cli)
+                    print("<span style=\"display:none\">\n")
+                    print(cl["persubject"][cli]["table"].to_html())
+                    print("</span>")
+                    #print("<p>Cluster %i - subject values %s"%(cli,cl["persubject"][cli]))
+                    print("<p><table><tr><td><img src=\"data:image/png;base64,%s\" /></td>\n"%cl["persubject"][cli]["png"])
+                    print("<td><img style=\"width : 600; height:auto\" src=\"data:image/png;base64,%s\" /></td></tr></table>\n"%cl["persubject"][cli]["cluster.rendering"])
+
+
+                print("<p style=\"padding:50px\" />") # add a little space to clarify
+
+
+
+            else:
+                #print("<p><a href=\"%s\">show</a></p>\n"%r)
+                pass
+
+                #print("<p>fsleyes --scene ortho --layout horizontal /usr/share/fsl/5.0/data/standard/MNI152_T1_1mm.nii.gz --overlayType volume --name MNI152_T1_1mm --volume 0 %s --cmap red-yellow &amp;</p>"%fullp)
 
 
 
 
-print("</body></html>\n")
+    print("</body></html>\n")
