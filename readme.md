@@ -3,7 +3,7 @@
 
 Here are some notes and tools relating to using [C-PAC](https://github.com/FCP-INDI/C-PAC).
 
-* `make_sca_report.py` - A little tool that takes a seed-based correlation analysis (SCA) output folder and produces an overview of the results in a self-contained HTML file. Usage: `python make_sca_report.py <output_dir> > <html_file>` which will parse `<output_dir>` and will create `<html_file>` with the results.
+* `make_sca_report.py` - A little tool that takes a seed-based correlation analysis (SCA) output folder and produces an overview of the results in a self-contained HTML file. Usage: `python make_sca_report.py <CPAC_gpa_config.yml>` (where `CPAC_gpa_config.yaml` is the CPAC configuration file for the group analysis), which will parse the corresponding output directory and will create an HTML file with the results in the parent directory of the output directory.
 
 
 
@@ -17,6 +17,10 @@ Here are some notes and tools relating to using [C-PAC](https://github.com/FCP-I
 ```
 cpac_setup.py /path/to/data_config
 ```
+
+
+## Setting up contrasts
+You can make your own contrasts file, and F-tests can be added by adding columns, but it is important to note that they should be called `f_test_<SOMETHING>`, otherwise they are interpreted as columns from the design matrix (which do not exist).
 
 
 ## Running

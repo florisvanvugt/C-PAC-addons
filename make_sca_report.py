@@ -15,13 +15,19 @@ import numpy as np
 import matplotlib as mpl
 mpl.use('Agg')
 import matplotlib.pyplot as plt
-import seaborn as sns
-sns.set(style="ticks",font_scale=1.5,font='Helvetica')
-sns.set_palette(sns.hls_palette(8, l=.3, s=.8))
 
-FULL_LIST = True
 
 USE_SEABORN = True
+
+if USE_SEABORN:
+    import seaborn as sns
+    sns.set(style="ticks",font_scale=1.5,font='Helvetica')
+    sns.set_palette(sns.hls_palette(8, l=.3, s=.8))
+
+
+    
+FULL_LIST = True
+
 
 
 import colorsys
@@ -154,16 +160,9 @@ os.environ["AFNI_NIFTI_TYPE_WARN"] = "NO"
 
 
 
-def read_contrasts(contrastf):
-    """ Given a contrasts file, parse it."""
-    pass
 
 
-
-
-
-
-def make_cluster_scatter(clustermaskf,cluster_n,mergedf,design_matrix,contrast,contrastsf,label,color="red"):
+def make_cluster_scatter(clustermaskf,cluster_n,mergedf,design_matrix,stat_index,stat_name,is_f_test,contrastsf,ftestf,gpa_info,label,color="red"):
     """ 
     Given a cluster mask file, and a subject merged file, extract all the connectivity
     values for a given cluster for all subjects separately. Average them and then
@@ -174,11 +173,49 @@ def make_cluster_scatter(clustermaskf,cluster_n,mergedf,design_matrix,contrast,c
     cluster_n      : which cluster to produce a scatter plot for
     mergedf        : the file name containing the merged data, i.e. one volume for every subject containing their correlation values
     design_matrix  : the design matrix of the study, assumed to be a pandas DataFrame
+    stat_index     : the number of the statistic (e.g. the number of the contrast or the number of the f-test
+    stat_name      : the name of the statistic (e.g. the name of the contrast)
+    is_f_test      : boolean telling us whether this is an F-test (True) or a contrast (False)
     contrast       : the contrast to be plotted
     contrastsf     : a file containing a listing of the contrasts
+    ftestf         : a file containing a listing of the f tests
+    gpa_info       : a parse of the group analysis CPAC yaml file
     label          : label to be added to the plot
     color          : the plotting color
-    """ 
+    """
+
+
+    def get_contrast_dependencies(contrast_i,mat):
+        """ 
+        Given a particular contrast, return us the columns
+        from the original phenotype table that this contrast
+        depends on (usually just one column really).
+
+        Arguments
+        contrast_i : the index of the contrast
+        mat        : the contrast matrix
+        """
+        # Extract just that one contrast
+        contrast_def = np.array(mat[contrast_i]).flatten() # list of the multipliers of the design matrix columns to find the contrast for each subject
+
+        # Find the columns of the design matrix implicated in this contrast
+        nonzerocols = list(design_matrix.columns[ np.where(contrast_def!=0) ])
+
+        behavs = []
+        for col in nonzerocols:
+
+            if col in gpa_info["pheno"].columns:
+                behavs.append(col)
+            else:
+                # If this is one level of a multilevel factor
+                mtc = re.match(r'C\((.+)\)\[(\d+)\]',col)
+                if mtc:
+                    behavs.append(mtc.group(1))
+
+                
+                
+        behavs = list(set(behavs)) # make unique
+        return behavs
 
 
     #tab = {"subject":cl["subject.list"]}
@@ -188,47 +225,77 @@ def make_cluster_scatter(clustermaskf,cluster_n,mergedf,design_matrix,contrast,c
     # Read in the contrasts file
     with open(contrastsf,'r') as f:
         contrasts = f.read()
-    
-    # First, find the number of the contrast
-    matc = re.search(r'/ContrastName(\d+)\s*(%s)'%contrast,contrasts)
-    if matc:
-        contrast_i = int(matc.group(1))-1
-    else:
-        print "Cannot find contrast called %s in the contrast file %s"%(contrast,contrastsf)
-        return
 
     # Find the contrast matrix definition and read it into a matrix
     mati = contrasts.find('/Matrix')
     if mati>-1: # it should be
-        mat = np.genfromtxt(StringIO.StringIO(contrasts[mati+7:]))
+        contrasts_mat = np.genfromtxt(StringIO.StringIO(contrasts[mati+7:]))
         # columns are the columns in the design matrix
         # rows are the different contrasts
 
 
+    # Read the f-tests file if we have one
+    ftest_mat = None
+    if ftestf!=None:
         
-    # Extract just that one contrast
-    contrast_def = np.array(mat[contrast_i]).flatten() # list of the multipliers of the design matrix columns to find the contrast for each subject
+        with open(ftestf,'r') as f:
+            ftestcont = f.read()
+        # Find the contrast matrix definition and read it into a matrix
+        mati = ftestcont.find('/Matrix')
+        if mati>-1: # it should be
+            ftest_mat = np.genfromtxt(StringIO.StringIO(ftestcont[mati+7:]))
+            # columns are the columns in the design matrix
+            # rows are the different contrasts
 
-    n_nonzero = sum(contrast_def!=0)
-    
-    if n_nonzero==1:
-        # All right, now let's say that a contrast really has only one non-zero value.
-        # Then we just want to plot the corresponding data column. If say it's negative we don't
-        # want to plot the negative of that column, I think that would be more confusing than helpful.
+
+
+    is_categorical = False
+    if not is_f_test:
+
         
-        EV_name = design_matrix.columns[np.where(contrast_def!=0)[0]]
-        
-        
+        contrast_i = stat_index-1
+        deps = get_contrast_dependencies(contrast_i,contrasts_mat)
+
     else:
-        # Okay, so this is complex contrast consisting of multiple values.
-        # Let's compute the contrast values for all subjects and go ahead,
-        # adding this to our "design matrix".
+
+        if ftestf==None:
+            print("Error, no ftest file for %s"%stat_name)
+            exit()
+            
+        # Let's extract the contrasts that this f-test depends on...
+        fdef = np.array(ftest_mat[stat_index-1]).flatten()
+        contrast_is, = np.where( fdef!=0 )
+        #print("%s depends on contrasts"%stat_name,contrast_is)
+
+        deps = []
+        for i in contrast_is:
+            #print("Contrast %i"%i)
+            deps += get_contrast_dependencies(i,contrasts_mat)
+        deps = list(set(deps))
+
+
         
-        EV_name = contrast
-        # Let's now add this to the design matrix
-        tab[EV_name]=np.array(np.dot(np.matrix(design_matrix),contrast_def)).flatten()
-    
-    
+    if len(deps)==1:
+        # Great, we are good to go!
+        behav = deps[0]
+        tab[behav] = gpa_info["pheno"][behav]
+        EV_name = behav
+
+        is_categorical = behav in gpa_info["ev_selections"].get("categorical",[])
+
+    else:
+
+        if not is_f_test:
+            # Compute the actual contrast and show that
+            EV_name = stat_name
+            # Let's now add this to the design matrix
+            tab[EV_name]=np.array(np.dot(np.matrix(design_matrix),contrast_def)).flatten()
+
+        else:
+            print("## Not sure what behavioural variable to plot for f-test %s"%stat_name)
+            return {'table':pd.DataFrame({}),'png':""} #,"cluster.rendering":clusterrender}
+        
+
     
 
     for valtype in ["mean","min","max","median"]:
@@ -272,9 +339,18 @@ def make_cluster_scatter(clustermaskf,cluster_n,mergedf,design_matrix,contrast,c
         ax = fig.add_subplot(111)
         ax.plot(tab[EV_name],tab["mean"],'o',color=color)
     else:
+
+            
         fig = plt.figure(figsize=(7,7))
         ax = fig.add_subplot(111)
-        sns.regplot(tab[EV_name],tab["mean"],color=color,ax=ax)
+        if is_categorical:
+            for i,dat in tab.groupby(EV_name):
+                mn = np.mean(dat["mean"])
+                ax.bar(i,mn,color=color,alpha=.3)
+            
+            ax.plot(tab[EV_name],tab["mean"],'o',color=color)
+        else:
+            sns.regplot(tab[EV_name],tab["mean"],color=color,ax=ax)
 
     # If the values cross zero, add a zero line
     minm,maxm= min(tab["mean"]),max(tab["mean"])
@@ -308,23 +384,41 @@ def make_cluster_scatter(clustermaskf,cluster_n,mergedf,design_matrix,contrast,c
 if __name__=="__main__":
 
 
-    print("<html><body>\n")
 
     if len(sys.argv)<2:
-        print("give the directory as an argument.")
+        print("give the gpa config file as argument.")
         print("usage:")
-        print("python make_sca_report <cpac_output_directory>")
+        print("python make_sca_report <cpac_gpa_config_file.yml>")
         exit(-1)
 
-    startdir = sys.argv[1] # the directory where we should start looking
+    # Let's read the YAML
+    import yaml
+    yamlf = sys.argv[1]
+    with open(yamlf,'r') as f:
+        gpa_dat = yaml.load(f)
+        
+    startdir  = gpa_dat["output_dir"]
+
+    # Read the pheno type file
+    phenofile = gpa_dat["pheno_file"]
+    gpa_dat["pheno"]=pd.DataFrame.from_csv(phenofile)
+
+    
+    # This is the file that we will write our html to
+    outputfile = gpa_dat["output_dir"]
+    if outputfile.endswith("/"):
+        outputfile=outputfile[:-1]
+    outputfile+=".html"
+
+    htmlout=""
+    
+    
+    print("Writing output to %s"%outputfile)
 
 
     if not os.path.exists(startdir):
         print("Cannot find directory %s"%startdir)
         exit(-1)
-
-
-
 
     basedir = None
     for root, dirs, files in os.walk(startdir):
@@ -361,6 +455,9 @@ if __name__=="__main__":
 
         path = "%s/_fisher_z_score%i/sca_ROI_%i"%(basedir,i,i+1)
 
+        # Now we walk through the results, looking for all contrasts and F tests in turn,
+        # start looking for the first contrast, and keep going until we hit a contrast
+        # that does not exist...
         for stattype in ["","f"]:
 
             keep_going = True
@@ -390,14 +487,18 @@ if __name__=="__main__":
                     # Find the contrasts file associated with this analysis, parse it
                     # to get the contrast and F-test names.
                     modelf = None
+                    ftestf = None
                     fs = os.listdir(modeld)
                     for f in fs:
                         if f.endswith(".con"):
                             modelf = modeld+"/"+f
+                        if f.endswith('.fts'):
+                            ftestf = modeld+"/"+f
+                            
                     with open(modelf,'r') as f:
                         contf = f.read()
                     contrasts = dict([ (int(x),n) for (x,n) in re.findall(r'/ContrastName(\d+)\s*([<>\.\w_\-\+]+)',contf)])
-                    f_tests   = dict([ (f+1   ,n) for (f,n) in enumerate(re.findall(r'f_test_([\w\_\-\+]+)',contf)) ])
+                    f_tests   = dict([ (f+1   ,n) for (f,n) in enumerate(re.findall(r'[fF]_[tT][Ee][Ss][Tt]_?([<>\w\_\-\+]+)',contf)) ])
 
                     # Open the cluster listing
                     with open(clusterl,'r') as f:
@@ -411,7 +512,7 @@ if __name__=="__main__":
                     if stattype=="": # contrast
                         statname=contrasts[j]
                     elif stattype=="f": # F-test
-                        statname="F-"+f_tests[j]
+                        statname=f_tests[j] #"F-"+f_tests[j]
 
                     # Find the merged file (where each volume is one subject z-map)
                     mergedd = "%s/merged"%path
@@ -422,21 +523,23 @@ if __name__=="__main__":
                             mergedfile = mergedd+"/"+fs[0]
 
 
-                    master_cluster_list.append({"seed"        :i+1,
-                                                "path"        :path,
-                                                "body"        :bodyname,
-                                                "stat"        :"%s%i"%(stattype,j),
-                                                "contrast.names":contrasts,
+                    master_cluster_list.append({"seed"          :i+1,
+                                                "path"          :path,
+                                                "body"          :bodyname,
+                                                "stattype"      :stattype,
+                                                "n"             :j,
+                                                "stat"          :"%s%i"%(stattype,j),
                                                 "contrasts.file":modelf,
-                                                "cluster.file":clusterl,
-                                                "cluster.mask":clustermask,
-                                                "n.cluster"   :len(lns)-1,
-                                                "rendered"    :renderedf,
-                                                "clustertab"  :clustertab,
-                                                "merged.file" :mergedfile,
-                                                "statname"    :statname,
-                                                "subject.list":subjectl,
-                                                "design.matrix":designmat,
+                                                "ftest.file"    :ftestf,
+                                                "cluster.file"  :clusterl,
+                                                "cluster.mask"  :clustermask,
+                                                "n.cluster"     :len(lns)-1,
+                                                "rendered"      :renderedf,
+                                                "clustertab"    :clustertab,
+                                                "merged.file"   :mergedfile,
+                                                "statname"      :statname,
+                                                "subject.list"  :subjectl,
+                                                "design.matrix" :designmat,
                     })
                     j+=1
 
@@ -451,8 +554,9 @@ if __name__=="__main__":
 
     
 
-
-
+    # Now we go through the list again and find seeds for which
+    # there is at least one cluster. In those cases, we have to
+    # make a table and go through each of the seeds in turn.
 
     for cl in master_cluster_list:
         cl["persubject"]={}
@@ -473,8 +577,12 @@ if __name__=="__main__":
                                             cluster_n    = cluster_n+1,
                                             mergedf      = cl["merged.file"],
                                             design_matrix= cl["design.matrix"],
-                                            contrast     = cl["statname"],
+                                            stat_index   = cl["n"],
+                                            stat_name    = cl["statname"],
+                                            is_f_test    = cl["stattype"]=="f",
                                             contrastsf   = cl["contrasts.file"],
+                                            ftestf       = cl["ftest.file"],
+                                            gpa_info     = gpa_dat,
                                             label        = "Seed %i stat %s cluster %i"%(cl["seed"],cl["statname"],cluster_n+1),
                                             color         = colours[cluster_n]
                 )
@@ -487,7 +595,7 @@ if __name__=="__main__":
 
 
 
-    print("""
+    htmlout+="""<html><body>
     <style>
     #seedresults {
         font-family: Helvetica, sans-serif;
@@ -526,70 +634,74 @@ if __name__=="__main__":
 
 
     </style>
-    """)
+    """
 
 
 
 
 
 
-    print("<h1>Cluster list</h1>")
-    print("<table id=\"seedresults\">")
-    print("<tr><th>Seed</th><th>Stat</th><th>Cluster file</th><th># clust</th><th>Render</th></tr>\n")
+    htmlout+="<h1>Cluster list</h1>"
+    htmlout+="<table id=\"seedresults\">"
+    htmlout+="<tr><th>Seed</th><th>Stat</th><th>Cluster file</th><th># clust</th><th>Render</th></tr>\n"
     for cl in master_cluster_list:
+
+        nm = cl["statname"] if cl["stattype"]=="" else "F["+cl["statname"]+"]"
+        
         if cl["n.cluster"]==0:
             nclust = "."
             render = "."
         else:
             nclust = str(cl["n.cluster"])
             render = "<a href=\"#%s\">render</a>"%cl["rendered"]
-        print("<tr><td>%i</td><td>%s</td><td><a href=\"%s\">clusters</a></td><td>%s</td><td>%s</td></tr>\n"%(cl["seed"],
-                                                                                                             #cl["stat"],
-                                                                                                             cl["statname"],
-                                                                                                             cl["cluster.file"],
-                                                                                                             nclust,
-                                                                                                             render))
-    print("</table>")
+        htmlout+="<tr><td>%i</td><td>%s</td><td><a href=\"%s\">clusters</a></td><td>%s</td><td>%s</td></tr>\n"%(cl["seed"],
+                                                                                                                #cl["stat"],
+                                                                                                                nm,
+                                                                                                                cl["cluster.file"],
+                                                                                                                nclust,
+                                                                                                                render)
+    htmlout+="</table>"
 
 
 
     if FULL_LIST:
 
-        print("<h1>Full listing</h1>\n")
+        htmlout+="<h1>Full listing</h1>\n"
 
         for cl in master_cluster_list:
             rendered_filename = cl["rendered"]
 
 
             if cl["n.cluster"]>0:
-                print("<h3><a name=\"%s\">Seed %i stat %s</a></h3>"%(rendered_filename,cl["seed"],cl["statname"]))
+                htmlout+="<h3><a name=\"%s\">Seed %i stat %s</a></h3>"%(rendered_filename,cl["seed"],cl["statname"])
 
                 #print("<p><img src=\"%s\" /></p>\n"%r)
 
                 # Now read the image and put it directly into the HTML (so that it is standalone)
                 encoded = base64.b64encode(open(rendered_filename, "rb").read())
-                print("<p><img src=\"data:image/png;base64,%s\" /></p>"%encoded)
+                htmlout+="<p><img src=\"data:image/png;base64,%s\" /></p>"%encoded
 
 
                 fullp = "%s/%s/stats/threshold/thresh_%s.nii.gz"%(cwd,cl["path"],cl["body"])
                 #fullp = "%s/%s/rendered/thresh_%s_overlay.nii.gz"%(cwd,cl["path"],cl["body"])
                 cmd = "fsleyes /usr/share/fsl/5.0/data/standard/MNI152_T1_1mm.nii.gz --name MNI152_T1_1mm --brightness 40 %s --cmap red-yellow"%fullp
-                print("<p style=\"font-size: small;\">%s</p>"%cmd)
+                htmlout+="<p style=\"font-size: small;\">%s</p>"%cmd
 
                 # Print the list of clusters and some data associated with it
-                print(cl["clustertab"].to_html())
+                cl["clustertab"]["P"] = [ "%.09f"%f for f in list(cl["clustertab"]["P"]) ]
+                htmlout+=cl["clustertab"].to_html()
 
                 for cli in cl["persubject"]:
-                    print("<h4>Cluster %i</h4>"%cli)
-                    print("<span style=\"display:none\">\n")
-                    print(cl["persubject"][cli]["table"].to_html())
-                    print("</span>")
+                    htmlout+="<h4>Cluster %i</h4>"%cli
+                    htmlout+="<span style=\"display:none\">\n"
+                    htmlout+=cl["persubject"][cli]["table"].to_html()
+                    htmlout+="</span>"
                     #print("<p>Cluster %i - subject values %s"%(cli,cl["persubject"][cli]))
-                    print("<p><table><tr><td><img src=\"data:image/png;base64,%s\" /></td>\n"%cl["persubject"][cli]["png"])
-                    print("<td><img style=\"width : 600; height:auto\" src=\"data:image/png;base64,%s\" /></td></tr></table>\n"%cl["persubject"][cli]["cluster.rendering"])
+                    htmlout+="<p><table><tr><td><img src=\"data:image/png;base64,%s\" /></td>\n"%cl["persubject"][cli]["png"]
+                    htmlout+="<td><img style=\"width : 600; height:auto\" src=\"data:image/png;base64,%s\" /></td></tr></table>\n"%cl["persubject"][cli]["cluster.rendering"]
 
 
-                print("<p style=\"padding:50px\" />") # add a little space to clarify
+                htmlout+="<p style=\"padding:50px\" />" # add a little space to clarify
 
 
 
@@ -602,4 +714,11 @@ if __name__=="__main__":
 
 
 
-    print("</body></html>\n")
+    htmlout+="</body></html>\n"
+
+
+    # Now actually write the output to file
+    fout = open(outputfile,'w')
+    fout.write(htmlout)
+    fout.close()
+    
