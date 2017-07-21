@@ -29,6 +29,10 @@ if USE_SEABORN:
 FULL_LIST = True
 
 
+# Whether to show a (hidden) table with behavioural data in the output document
+SHOW_BEHAV_TABLE = False
+
+
 
 import colorsys
 
@@ -682,9 +686,9 @@ if __name__=="__main__":
                 htmlout+="<p><img src=\"data:image/png;base64,%s\" /></p>"%encoded
 
 
-                fullp = "%s/%s/stats/threshold/thresh_%s.nii.gz"%(cwd,cl["path"],cl["body"])
+                fullp = "%s/stats/threshold/thresh_%s.nii.gz"%(cl["path"],cl["body"])
                 #fullp = "%s/%s/rendered/thresh_%s_overlay.nii.gz"%(cwd,cl["path"],cl["body"])
-                cmd = "fsleyes /usr/share/fsl/5.0/data/standard/MNI152_T1_1mm.nii.gz --name MNI152_T1_1mm --brightness 40 %s --cmap red-yellow"%fullp
+                cmd = "fsleyes /usr/share/fsl/5.0/data/standard/MNI152_T1_1mm.nii.gz --name MNI152_T1_1mm --brightness 40 %s -n \"seed %i %s\" --cmap red-yellow"%(fullp,cl["seed"],cl["statname"])
                 htmlout+="<p style=\"font-size: small;\">%s</p>"%cmd
 
                 # Print the list of clusters and some data associated with it
@@ -693,9 +697,13 @@ if __name__=="__main__":
 
                 for cli in cl["persubject"]:
                     htmlout+="<h4>Cluster %i</h4>"%cli
-                    htmlout+="<span style=\"display:none\">\n"
-                    htmlout+=cl["persubject"][cli]["table"].to_html()
-                    htmlout+="</span>"
+
+                    # Show the cluster table
+                    if SHOW_BEHAV_TABLE:
+                        htmlout+="<span style=\"display:none\">\n"
+                        htmlout+=cl["persubject"][cli]["table"].to_html()
+                        htmlout+="</span>"
+                        
                     #print("<p>Cluster %i - subject values %s"%(cli,cl["persubject"][cli]))
                     htmlout+="<p><table><tr><td><img src=\"data:image/png;base64,%s\" /></td>\n"%cl["persubject"][cli]["png"]
                     htmlout+="<td><img style=\"width : 600; height:auto\" src=\"data:image/png;base64,%s\" /></td></tr></table>\n"%cl["persubject"][cli]["cluster.rendering"]
