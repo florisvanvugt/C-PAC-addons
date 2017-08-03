@@ -15,6 +15,7 @@ import numpy as np
 import matplotlib as mpl
 mpl.use('Agg')
 import matplotlib.pyplot as plt
+import yaml
 
 
 USE_SEABORN = True
@@ -32,6 +33,16 @@ FULL_LIST = True
 # Whether to show a (hidden) table with behavioural data in the output document
 SHOW_BEHAV_TABLE = False
 
+
+# The factor to use when rendering. When we make a rendering, we usually
+# show all axial slices, except if the render factor is set here, in which
+# case we show only 1 in every RENDER_FACTOR images. We also make the output
+# image larger at first and then use imagemagick to scale it down.
+RENDER_FACTOR = 3
+TEMPLATE = "/usr/share/fsl/5.0/data/standard/MNI152_T1_1mm_brain.nii.gz"
+
+#RENDER_FACTOR = 1
+#TEMPLATE = "/usr/share/fsl/5.0/data/standard/MNI152_T1_3mm_brain.nii.gz"
 
 
 import colorsys
@@ -100,7 +111,45 @@ def make_lut(colour,greyscale=.7):
 
 
 
-def make_cluster_rendering(clusterfile,cluster_n,colour=(1.0,0,0),image_width=750,template = "/usr/share/fsl/5.0/data/standard/MNI152_T1_3mm_brain.nii.gz"):
+def make_zmap_rendering(thresh_stat_overlay,image_width=750):
+    """
+    Makes a rendering of a particular z map or f map.
+    I wrote this function because for high-resolution analyses (e.g. functional at 1mm)
+    CPAC outputs renderings in a very narrow but long image format.
+
+    thresh_stat_overlay : the nifty file of the combined anatomical & stats map overlay file
+    image_width : the desired image output width.
+
+    Returns
+    A base64-encoded string of the image
+    """
+
+    print("Making zmap %s"%thresh_stat_overlay)
+    tmp_image    = "/tmp/_overlay.png"
+    img_output = "/tmp/overlay.png"
+    
+    # Then produce an image rendition of this overlay
+    cmd = ["slicer",thresh_stat_overlay,
+           #"-l",lut,
+           "-S",str(RENDER_FACTOR),str(image_width*RENDER_FACTOR),
+           tmp_image
+    ]
+    subprocess.call(cmd)
+
+    # Now convert the image back to a usable size
+    cmd = ["convert","-resize",str(image_width),"-quality","9",
+           tmp_image,img_output]
+    subprocess.call(cmd)
+
+    return base64.b64encode(open(img_output, "rb").read())
+
+    
+    
+
+
+
+
+def make_cluster_rendering(clusterfile,cluster_n,colour=(1.0,0,0),image_width=750,template = TEMPLATE):
     """ 
     Makes a rendering of a particular cluster, overlaid on a template.
 
@@ -116,11 +165,12 @@ def make_cluster_rendering(clusterfile,cluster_n,colour=(1.0,0,0),image_width=75
     
     # Define some temporary files
     cluster_only  = "/tmp/cluster_only.nii.gz"
-    overlay       = "/tmp/.zstat_overlay.nii.gz" # file that will be created in this process
+    overlay       = "/tmp/zstat_overlay.nii.gz" # file that will be created in this process
+    tmp_image     = "/tmp/tmp.png" # image file, the actual output that we care about
     overlay_image = "/tmp/cluster_overlay.png" # image file, the actual output that we care about
 
     # Remove any previous files so that we don't accidentally produce the same figure
-    subprocess.call(['rm','-f',overlay_image,overlay,cluster_only])
+    subprocess.call(['rm','-f',overlay_image,overlay,cluster_only,tmp_image])
     
     # First create a cluster mask for just that one cluster (0 for all voxels except for the voxels in the cluster which have value 1).
     cmd = ["3dcalc","-a",clusterfile,
@@ -134,16 +184,25 @@ def make_cluster_rendering(clusterfile,cluster_n,colour=(1.0,0,0),image_width=75
            overlay]
     #print(" ".join(cmd))
     subprocess.call(cmd)
-    
+
+    # Then produce an image rendition of this
     cmd = ["slicer",overlay,
            #"-L",
            "-l",lut,
-           "-A",str(image_width),#"750",
-           overlay_image
+           #"-A",str(image_width*RENDER_FACTOR),#"750",
+           "-S",str(RENDER_FACTOR),str(image_width*RENDER_FACTOR),#"750",
+           tmp_image
     ]
+
     #print(" ".join(cmd))
     subprocess.call(cmd)
-    
+
+    # Now convert the image back to a usable size
+    cmd = ["convert","-resize",str(image_width),
+           tmp_image,overlay_image]
+    subprocess.call(cmd)
+
+
     return base64.b64encode(open(overlay_image, "rb").read())
 
 
@@ -393,15 +452,30 @@ if __name__=="__main__":
         print("give the gpa config file as argument.")
         print("usage:")
         print("python make_sca_report <cpac_gpa_config_file.yml>")
-        exit(-1)
 
-    # Let's read the YAML
-    import yaml
-    yamlf = sys.argv[1]
+        from Tkinter import *
+        from tkFileDialog import *
+        #from Tkinter.filedialog import askopenfilename
+        fname = askopenfilename(filetypes=[("CPAC", ("*.yml","*.yaml")),("All files","*.*")])
+        if fname:
+            yamlf = fname
+            print("Inhaling group analysis filename %s"%yamlf)
+        else:
+            exit(-1)
+
+
+    else:
+            
+        # Let's read the YAML
+        yamlf = sys.argv[1]
+
+        
     with open(yamlf,'r') as f:
         gpa_dat = yaml.load(f)
         
-    startdir  = gpa_dat["output_dir"]
+    startdir   = gpa_dat["output_dir"]
+    modelname  = gpa_dat["model_name"]
+    analysis_title =  "%s %s"%(os.path.basename(startdir),modelname)
 
     # Read the pheno type file
     phenofile = gpa_dat["pheno_file"]
@@ -442,8 +516,6 @@ if __name__=="__main__":
 
 
 
-    cwd = os.getcwd()
-
 
     # First, let's find the subpath where we have the split up by seed,
     # i.e. the path where you have the _fisher_z_scoreXX
@@ -471,7 +543,8 @@ if __name__=="__main__":
                 bodyname     = "z%sstat%i"%(stattype,j)
                 clusterl     = "%s/stats/clusterMap/cluster_%s.txt"%(path,bodyname)
                 clustermask  = "%s/stats/clusterMap/cluster_mask_%s.nii.gz"%(path,bodyname)
-                renderedf    = "%s/rendered/thresh_z%sstat%i_overlay.png"%(path,stattype,j) 
+                renderednii  = "%s/rendered/thresh_z%sstat%i_overlay.nii.gz"%(path,stattype,j) 
+                #renderedf    = "%s/rendered/thresh_z%sstat%i_overlay.png"%(path,stattype,j) 
 
                 modeld = "%s/model_files"%path
 
@@ -527,6 +600,10 @@ if __name__=="__main__":
                             mergedfile = mergedd+"/"+fs[0]
 
 
+                    # Make a rendering of the zmap (overlay)
+                    renderedimg = make_zmap_rendering(renderednii)
+
+                            
                     master_cluster_list.append({"seed"          :i+1,
                                                 "path"          :path,
                                                 "body"          :bodyname,
@@ -538,7 +615,8 @@ if __name__=="__main__":
                                                 "cluster.file"  :clusterl,
                                                 "cluster.mask"  :clustermask,
                                                 "n.cluster"     :len(lns)-1,
-                                                "rendered"      :renderedf,
+                                                "rendered"      :renderednii,
+                                                "rendered_img"  :renderedimg,
                                                 "clustertab"    :clustertab,
                                                 "merged.file"   :mergedfile,
                                                 "statname"      :statname,
@@ -574,7 +652,7 @@ if __name__=="__main__":
             for cluster_n in range(cl["n.cluster"]):
 
 
-                clusterrender = make_cluster_rendering(cl["cluster.mask"],cluster_n+1,colour=colours[cluster_n],template = "/usr/share/fsl/5.0/data/standard/MNI152_T1_3mm_brain.nii.gz")
+                clusterrender = make_cluster_rendering(cl["cluster.mask"],cluster_n+1,colour=colours[cluster_n],template = TEMPLATE)
 
 
                 clsc = make_cluster_scatter(clustermaskf = cl["cluster.mask"],
@@ -645,6 +723,7 @@ if __name__=="__main__":
 
 
 
+    htmlout+="<h1>%s</h1>"%analysis_title
     htmlout+="<h1>Cluster list</h1>"
     htmlout+="<table id=\"seedresults\">"
     htmlout+="<tr><th>Seed</th><th>Stat</th><th>Cluster file</th><th># clust</th><th>Render</th></tr>\n"
@@ -682,8 +761,7 @@ if __name__=="__main__":
                 #print("<p><img src=\"%s\" /></p>\n"%r)
 
                 # Now read the image and put it directly into the HTML (so that it is standalone)
-                encoded = base64.b64encode(open(rendered_filename, "rb").read())
-                htmlout+="<p><img src=\"data:image/png;base64,%s\" /></p>"%encoded
+                htmlout+="<p><img src=\"data:image/png;base64,%s\" /></p>"%cl["rendered_img"]
 
 
                 fullp = "%s/stats/threshold/thresh_%s.nii.gz"%(cl["path"],cl["body"])
